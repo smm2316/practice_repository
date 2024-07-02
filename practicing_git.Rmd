@@ -19,6 +19,8 @@ When you click the **Knit** button a document will be generated that includes bo
 summary(cars)
 
 shes making some changes, doing some things 
+
+do i keep making this a mess? 
 ```
 
 ## Including Plots
