@@ -1,0 +1,3596 @@
+---
+title: "Practicing_with_functions"
+author: "Sarah McLarnan"
+date: "2024-07-02"
+output: html_document
+---
+
+---
+title: "PAH UC mtDNAcn Analysis"
+author: "Sarah McLarnan"
+date: "2024-1-5"
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_collapsed: yes
+    toc_depth: 3
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(plotly)
+library(tcpl)
+library(tidyverse)
+library(viridis)
+library(modelr)
+library(drc)
+library(broom)
+library(kableExtra)
+library(tcplfit2)
+library(ggpmisc)
+library(foreign)
+library(haven)
+library(readr)
+library(caret)
+library(moderndive)
+library(naniar)
+library(psycho)
+library(psych)
+library(factoextra)
+library(ggcorrplot)
+library(ggfortify)  
+library(gridExtra)
+library(GPArotation)
+library(ggrepel)
+library(pals)
+library(GGally)
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis",
+  pillar.sigfig = 3
+
+)
+theme_set(theme_bw() + theme(legend.position = "bottom"))
+```
+
+```{r, data import, echo = FALSE}
+pah_data_1 = read.csv("./data/pah_res_1.csv") %>%
+  janitor::clean_names() %>%
+  dplyr::select(-sample_name, -x)%>%
+  mutate(batch = 1)
+
+pah_data_2 = read.csv("./data/pah_res_2.csv") %>%
+  janitor::clean_names() %>%
+  mutate(batch = 2)
+
+pah_data = rbind(pah_data_1, pah_data_2)
+
+pah_data$ng_g = as.numeric(str_extract(pah_data$ng_g, "\\d+\\.*\\d+"))
+
+pah_data$ng_g <- ifelse(pah_data$qualifier == "U", pah_data$ng_g / sqrt(2), pah_data$ng_g)
+
+write.csv(pah_data, "./pah_data_full.csv")
+
+pah_data_wide = read.csv("./data/wide_pah_subset.csv")
+
+mtdnacn_data = read.csv("./data/mtdnacn_res.csv")%>%
+  janitor::clean_names() %>%
+  rename(sid = sample)
+
+load("./data/KR_2023_12_21.RData")
+
+covariate_data = KR_2023_12_21 %>%
+  janitor::clean_names()%>%
+  rename(sid = studyid)
+
+full_data = left_join(pah_data, mtdnacn_data, by = "sid") %>%
+  drop_na()
+
+full_data = left_join(full_data, covariate_data, by = "sid")
+
+full_data = dplyr::select(full_data, -c('fourmid':'rep_tcep'))
+full_data = dplyr::select(full_data, -c('o22_3':'date4mo'))
+full_data = dplyr::select(full_data, -c('wrist_lab_number':'status'))
+full_data = full_data %>%
+  dplyr::select(-bsex)
+
+full_data = full_data %>%
+  mutate(log_pah = log(ng_g)) %>%
+  mutate(mom_age = del_date - mom_dob) %>%
+  mutate(mom_age_num = as.numeric(mom_age)/365) %>%
+  mutate(est_gest_age = as.numeric(del_date - due_date))
+
+full_data = full_data %>%
+  mutate(dob_season = find_season(due_date))
+
+
+full_data$hardship <- ifelse(full_data$a11 == "Yes" | full_data$a12 == "Yes" | full_data$a13 == "Yes" | full_data$a14 == "Yes" | full_data$a15 == "Yes", 1, 0)
+
+nrow(data)
+
+
+write.csv(full_data, "./data/full_data.csv")
+
+full_sid = full_data %>%
+  dplyr::select(sid) 
+
+full_sid = distinct(full_sid, sid, .keep_all = TRUE)
+write.csv(full_sid, "./data/sid_2.csv")  
+
+length(unique(full_data$sid))
+length(unique(full_data$compound))
+
+
+## wide format
+full_data_wide = left_join(pah_data_wide, mtdnacn_data, by = "sid") %>%
+  drop_na()
+
+full_data_wide = left_join(full_data_wide, covariate_data, by = "sid")
+
+
+full_data_wide = dplyr::select(full_data_wide, -c('fourmid':'rep_tcep'))
+full_data_wide = dplyr::select(full_data_wide, -c('o22_3':'date4mo'))
+full_data_wide = dplyr::select(full_data_wide, -c('wrist_lab_number':'status'))
+full_data_wide = full_data_wide %>%
+  dplyr::select(-bsex)
+
+full_data_wide = full_data_wide %>%
+  mutate(mom_age = del_date - mom_dob) %>%
+  mutate(mom_age_num = as.numeric(mom_age)/365) %>%
+  mutate(est_gest_age = as.numeric(del_date - due_date))
+
+full_data_wide = full_data_wide %>%
+  mutate(dob_season = find_season(due_date))
+
+
+
+```
+
+```{r}
+mode <- function(x) {
+ux <- unique(x)
+ux[which.max(tabulate(match(x,ux)))]
+}
+
+full_data_u = full_data %>%
+  filter(qualifier == "U")
+
+lods = full_data_u %>%
+  group_by(compound) %>%
+  summarise(lod = mode(ng_g))
+
+min(lods$lod)
+max(lods$lod)
+
+
+ls(covariate_data)
+```
+
+
+```{r, LOD restriction, echo = FALSE}
+qualifier = full_data %>%
+  group_by(compound, qualifier) %>%
+  count()
+
+qualifier = qualifier %>%
+  filter(qualifier == "U")
+
+qualifier = qualifier %>%
+  mutate(perc = (n/94)*100)
+
+plot = qualifier %>%
+  ggplot(aes(x = perc)) + geom_bar() +
+  xlab("Percentage of observations BLOD") +
+  ylab("Number of Compounds") +
+  geom_vline(xintercept = 20, color = 'red')
+
+plot
+
+full_data = left_join(full_data, qualifier, by = "compound")
+
+full_data$lod <- ifelse(full_data$qualifier.x == 'U', "BLOD", "ALOD")
+full_data = full_data %>%
+  mutate(lod = as.factor(lod))
+
+full_data$lod = relevel(full_data$lod, "BLOD")
+  
+count = full_data %>%
+  count(lod == "BLOD")
+
+
+full_data = full_data%>%
+  filter(perc < 85)
+
+length(unique(full_data$compound))
+
+### restricting to samples where less than 85% of data is BLOD 
+
+
+full_data_50 = full_data%>%
+  filter(perc < 50)
+
+(unique(full_data_50$compound))
+
+### restricting to samples where less than 50% of data is BLOD 
+
+select_data = full_data %>%
+  dplyr::select(sid, compound, ng_g)
+
+select_data = select_data %>%
+  pivot_wider(names_from = compound, values_from = ng_g)
+
+select_data$total_pah = rowSums(select_data[,c("1,2-dimethylnaphthalene", "1,4-dimethylnaphthalene", "1,5-dimethylnaphthalene", "1,6 and 1,3-Dimethylnaphthalene", "1-methylnaphthalene", "1-methylpyrene", "2-ethylnaphthalene", "2-methylnaphthalene", "2-methylphenanthrene", "3,6-dimethylphenanthrene", "acenaphthene", "anthracene", "dibenzothiophene", "fluoranthene", "fluorene", "naphthalene", "Pyrene", "retene")])
+
+select_data = select_data %>%
+  dplyr::select(sid, total_pah)
+
+select_data = select_data %>%
+  pivot_longer(cols = c(total_pah), names_to = 'compound', values_to = 'ng_g')
+
+select_data = left_join(select_data, covariate_data, by = "sid")
+
+select_data$ng_g = as.numeric(str_extract(select_data$ng_g, "\\d+\\.*\\d+"))
+
+select_data = dplyr::select(select_data, -c('fourmid':'rep_tcep'))
+select_data = dplyr::select(select_data, -c('o22_3':'date4mo'))
+select_data = dplyr::select(select_data, -c('wrist_lab_number':'status'))
+select_data = select_data %>%
+  dplyr::select(-bsex)
+
+select_data = left_join(select_data, mtdnacn_data, by = "sid")
+
+select_data = select_data %>%
+  mutate(log_pah = log(ng_g)) %>%
+  mutate(mom_age = del_date - mom_dob) %>%
+  mutate(mom_age_num = as.numeric(mom_age)/365) %>%
+  mutate(est_gest_age = as.numeric(del_date - due_date))
+
+
+select_data = select_data %>%
+  mutate(dob_season = find_season(due_date))
+
+select_data$hardship <- ifelse(select_data$a11 == "Yes" | select_data$a12 == "Yes" | select_data$a13 == "Yes" | select_data$a14 == "Yes" | select_data$a15 == "Yes", 1, 0)
+
+select_data = select_data %>%
+  mutate(n = "NA", qualifier.x = "NA", qualifier.y = "NA", perc = "NA", lod = "NA", batch = "NA")
+
+full_data = rbind(full_data, select_data)
+
+length(unique(full_data$sid))
+
+```
+
+```{r}
+
+select_lod_data = full_data %>%
+  dplyr::select(sid, compound, lod)
+
+select_lod_data %>%
+  filter(lod == "ALOD") 
+
+unique(select_lod_data$compound)
+
+select_lod_data = select_lod_data %>%
+  pivot_wider(names_from = compound, values_from = lod)
+
+covar_select = read.csv("./data/full_clean_wide.csv") %>%
+  dplyr::select(sid, mom_age_num, est_gest_age, rel_due_date, winter, spring, summer, male, copynum)
+
+select_lod_data = left_join(select_lod_data, covar_select, by = "sid")
+
+write.csv(select_lod_data, "./data/lod_data.csv")
+```
+
+
+```{r}
+educ_data = full_data %>%
+  mutate(a03 = as.numeric(a03)) %>%
+  drop_na(a03)
+
+unique_sid = full_data %>%
+  dplyr::select(sid, a06) %>%
+  distinct(sid, a06)
+
+count = unique_sid %>%
+  group_by(a06)%>%
+  summarise(count = n())
+count
+
+
+unique_sid = full_data %>%
+  dplyr::select(sid, race) %>%
+  distinct(sid, race)
+
+count = unique_sid %>%
+  group_by(race)%>%
+  summarise(count = n())
+count
+
+
+vars_to_transform <- c("a11", "a12", "a13", "a14", "a15")
+
+# Convert "yes/no" to 1/0 using tidyr
+full_data <- full_data %>%
+  mutate(across(all_of(vars_to_transform), ~if_else(. == "Yes", 1, 0)))
+
+full_data <- full_data %>%
+  mutate(sum_vars = rowSums(.[vars_to_transform], na.rm = TRUE))
+
+
+unique_sid = full_data %>%
+  dplyr::select(sid, sum_vars) %>%
+  distinct(sid, sum_vars)
+
+mean(unique_sid$sum_vars)
+sd(unique_sid$sum_vars)
+
+count = unique_sid %>%
+  group_by(sum_vars)%>%
+  summarise(count = n())
+count
+```
+
+
+
+# Data Exploration
+
+## PAH - mtDNAcn Correlation Test
+```{r, correlation test, echo = FALSE}
+full_data %>%
+  group_by(compound) %>%
+  summarise(cor = cor(copynum, ng_g))
+
+full_data %>%
+  group_by(compound) %>%
+  summarise(cor = cor(copynum, log_pah))
+
+```
+```{r}
+lod_count = full_data %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+lod_count = lod_count %>%
+  filter(lod == "ALOD") %>%
+  mutate(perc = (n/94)*100)
+
+lod_count
+```
+
+
+
+## Covariates and Copy Number
+### Copy Number Distribution
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x=copynum)) + geom_density()
+plot
+
+```
+
+### Gestational Age
+```{r, echo = FALSE}
+gest_age_data = full_data %>%
+  filter(est_gest_age > -40)
+
+plot = gest_age_data %>% ggplot(aes(x = est_gest_age)) + geom_bar() +
+  xlab("Days from Due Date")
+plot
+
+plot = gest_age_data %>% ggplot(aes(x = est_gest_age, y = copynum)) + geom_point() + geom_smooth(method = "lm")
+plot
+
+cor.test(gest_age_data$est_gest_age, gest_age_data$copynum)
+
+
+```
+
+### Maternal Age
+```{r, echo = FALSE}
+mom_age_data = full_data %>%
+  filter(mom_age_num > 5)
+
+plot = mom_age_data %>% ggplot(aes(x = mom_age_num)) + geom_density() +xlim(12,40)
+plot
+
+
+plot = mom_age_data %>% ggplot(aes(x = mom_age_num, y = copynum)) + geom_point() + geom_smooth(method = "lm")
+plot
+
+cor.test(mom_age_data$mom_age_num, mom_age_data$copynum)
+```
+### Due Date
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x = due_date)) + geom_density() 
+plot
+
+plot = full_data %>% ggplot(aes(x = due_date, y = copynum)) + geom_point() + geom_smooth(method = "lm")
+plot
+
+full_data = full_data %>%
+  mutate(due_date_num = as.numeric(due_date))
+cor.test(full_data$due_date_num, full_data$copynum)
+
+```
+
+### Due Date Season
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x = dob_season)) + geom_bar() 
+plot
+
+plot = full_data %>% ggplot(aes(x = dob_season, y = copynum)) + geom_boxplot() 
+plot
+
+one.way <- aov(copynum ~ dob_season, data = full_data)
+summary(one.way)
+
+unique_sid = full_data %>%
+  dplyr::select(sid, dob_season) %>%
+  distinct(sid, dob_season)
+
+count = unique_sid %>%
+  group_by(dob_season)%>%
+  summarise(count = n())
+count
+
+```
+
+
+### Race
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x = race)) + geom_bar() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+plot = full_data %>% ggplot(aes(x = race, y = copynum)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(copynum ~ race, data = full_data)
+summary(one.way)
+
+```
+
+### race4
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x = race4)) + geom_bar() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+plot = full_data %>% ggplot(aes(x = race4, y = copynum)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(copynum ~ race4, data = full_data)
+summary(one.way)
+
+race4_filter = full_data %>% 
+  filter(race4 == "Not Hispanic or Latino" | race4 == "Hispanic or Latino")
+
+one.way <- aov(copynum ~ race4, data = full_data)
+summary(one.way)
+
+
+unique_sid = full_data %>%
+  dplyr::select(sid, race4) %>%
+  distinct(sid, race4)
+
+count = unique_sid %>%
+  group_by(race4)%>%
+  summarise(count = n())
+count
+
+```
+
+### Sex
+```{r, echo = FALSE}
+sex_data = full_data %>%
+  filter(mr_24 != "NA")
+
+plot = sex_data %>% ggplot(aes(x = mr_24)) + geom_bar() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+plot = sex_data %>% ggplot(aes(x = mr_24, y = copynum)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+t.test(sex_data$copynum ~ sex_data$mr_24)
+
+unique_sid = full_data %>%
+  dplyr::select(sid, mr_24) %>%
+  distinct(sid, mr_24)
+
+count = unique_sid %>%
+  group_by(mr_24)%>%
+  summarise(count = n())
+count
+```
+
+### Times Pregnant
+```{r, echo = FALSE}
+plot = full_data %>% ggplot(aes(x = b26)) + geom_bar() 
+plot
+
+plot = full_data %>% ggplot(aes(x = b26, y = copynum)) + geom_point() + geom_smooth(method = "lm")
+plot
+
+cor.test(full_data$b26, full_data$copynum)
+
+
+cor.test(full_data$mom_age_num, full_data$b26)
+
+
+```
+
+## compound_data = full_data %>% 
+  filter(compound == {{compound}})
+
+### two curly brackets to pass in 'string' sometimes.... the embrace (lol) addresses indirection - look past data frame to the arguments 
+
+
+## Practice Function - EDA 
+```{r}
+eda_function = function(compound) {
+  
+compound_data <- full_data %>% 
+  filter(compound == {{compound}})
+  
+cont_plot <- compound_data %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm) +
+  ggtitle(paste0(compound, ": Continuous PAH Copy Number") )
+ggsave("./plots/" paste0(compound))
+
+di_plot <- compound_data %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot() +
+  ggtitle(paste0(compound, ": Dichotomous PAH Copy Number") )
+
+cont_p = cor.test(compound_data$log_pah, compound_data$copynum)
+
+
+return(list(cont_plot = cont_plot, di_plot = di_plot, cont_p = cont_p))
+  
+}
+
+eda_function("1,2-dimethylnaphthalene")
+
+```
+
+```{r}
+library(purrr)
+nested_full_data = nest(full_data, .by = compound)
+
+map(nested_full_data, eda_function)
+```
+
+
+
+
+## 1,2-dimethylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dimethylnap12 = full_data %>% 
+  filter(compound == "1,2-dimethylnaphthalene") 
+
+plot = dimethylnap12 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = dimethylnap12 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dimethylnap12$log_pah, dimethylnap12$copynum)
+t.test(dimethylnap12$copynum ~ dimethylnap12$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+dimethylnap12 = full_data %>% 
+  filter(compound == "1,2-dimethylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = dimethylnap12 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dimethylnap12 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dimethylnap12$mom_age_num, dimethylnap12$log_pah)
+
+plot = dimethylnap12 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap12$mom_age_num ~ dimethylnap12$lod)
+
+## Gestational Age
+
+plot = dimethylnap12 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap12$est_gest_age, dimethylnap12$log_pah)
+
+plot = dimethylnap12 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap12$est_gest_age ~ dimethylnap12$lod)
+
+## Due Date
+plot = dimethylnap12 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dimethylnap12$due_date_num, dimethylnap12$log_pah)
+t.test(dimethylnap12$due_date_num ~ dimethylnap12$lod)
+
+plot = dimethylnap12 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dimethylnap12)
+summary(one.way)
+
+chisq.test(dimethylnap12$dob_season, dimethylnap12$lod)
+
+## Race
+plot = dimethylnap12 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dimethylnap12)
+summary(one.way)
+chisq.test(dimethylnap12$race, dimethylnap12$lod)
+
+## race4
+plot = dimethylnap12 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dimethylnap12)
+summary(one.way)
+chisq.test(dimethylnap12$race4, dimethylnap12$lod)
+
+## Sex
+plot = dimethylnap12 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+t.test(dimethylnap12$log_pah ~ dimethylnap12$mr_24)
+
+chisq.test(dimethylnap12$mr_24, dimethylnap12$lod)
+
+## Times Pregnant
+plot = dimethylnap12 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap12$b26, dimethylnap12$log_pah)
+
+plot = dimethylnap12 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap12$b26 ~ dimethylnap12$lod)
+```
+
+## 1,4-dimethylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dimethylnap14 = full_data %>% 
+  filter(compound == "1,4-dimethylnaphthalene") %>%
+  filter(log_pah < 4) 
+
+plot = dimethylnap14 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = dimethylnap14 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dimethylnap14$log_pah, dimethylnap14$copynum)
+t.test(dimethylnap14$copynum ~ dimethylnap14$lod)
+
+```
+### Covariates
+```{r, echo = FALSE}
+dimethylnap14 = full_data %>% 
+  filter(compound == "1,4-dimethylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40) %>%
+  filter(log_pah < 4) 
+
+lod_count = dimethylnap14 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dimethylnap14 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dimethylnap14$mom_age_num, dimethylnap14$log_pah)
+
+plot = dimethylnap14 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap14$mom_age_num ~ dimethylnap14$lod)
+
+## Gestational Age
+
+plot = dimethylnap14 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap14$est_gest_age, dimethylnap14$log_pah)
+
+plot = dimethylnap14 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap14$est_gest_age ~ dimethylnap14$lod)
+
+## Due Date
+plot = dimethylnap14 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dimethylnap14$due_date_num, dimethylnap14$log_pah)
+t.test(dimethylnap14$due_date_num ~ dimethylnap14$lod)
+
+plot = dimethylnap14 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dimethylnap14)
+summary(one.way)
+
+chisq.test(dimethylnap14$dob_season, dimethylnap14$lod)
+
+
+## Race
+plot = dimethylnap14 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dimethylnap14)
+summary(one.way)
+chisq.test(dimethylnap14$race, dimethylnap14$lod)
+
+## race4
+plot = dimethylnap14 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dimethylnap14)
+summary(one.way)
+chisq.test(dimethylnap14$race4, dimethylnap14$lod)
+
+## Sex
+plot = dimethylnap14 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = dimethylnap14)
+summary(one.way)
+
+chisq.test(dimethylnap14$mr_24, dimethylnap14$lod)
+
+## Times Pregnant
+plot = dimethylnap14 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap14$b26, dimethylnap14$log_pah)
+
+plot = dimethylnap14 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap14$b26 ~ dimethylnap14$lod)
+```
+
+## 1,5-dimethylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dimethylnap15 = full_data %>% 
+  filter(compound == "1,5-dimethylnaphthalene") 
+
+plot = dimethylnap15 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point()
+plot
+
+plot = dimethylnap15 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dimethylnap15$log_pah, dimethylnap15$copynum)
+t.test(dimethylnap15$copynum ~ dimethylnap15$lod)
+
+cor.test(dimethylnap15$est_gest_age, dimethylnap15$log_pah)
+t.test(dimethylnap15$est_gest_age ~ dimethylnap15$lod)
+
+```
+### Covariates
+```{r, echo = FALSE}
+dimethylnap15 = full_data %>% 
+  filter(compound == "1,5-dimethylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = dimethylnap15 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dimethylnap15 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dimethylnap15$mom_age_num, dimethylnap15$log_pah)
+
+plot = dimethylnap15 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap15$mom_age_num ~ dimethylnap15$lod)
+
+## Gestational Age
+
+plot = dimethylnap15 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap15$est_gest_age, dimethylnap15$log_pah)
+
+plot = dimethylnap15 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap15$est_gest_age ~ dimethylnap15$lod)
+
+## Due Date
+plot = dimethylnap15 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dimethylnap15$due_date_num, dimethylnap15$log_pah)
+t.test(dimethylnap15$due_date_num ~ dimethylnap15$lod)
+
+plot = dimethylnap15 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dimethylnap15)
+summary(one.way)
+
+chisq.test(dimethylnap15$dob_season, dimethylnap15$lod)
+
+## Race
+plot = dimethylnap15 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dimethylnap15)
+summary(one.way)
+chisq.test(dimethylnap15$race, dimethylnap15$lod)
+
+## race4
+plot = dimethylnap15 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dimethylnap15)
+summary(one.way)
+chisq.test(dimethylnap15$race4, dimethylnap15$lod)
+
+## Sex
+plot = dimethylnap15 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = dimethylnap15)
+summary(one.way)
+
+chisq.test(dimethylnap15$mr_24, dimethylnap15$lod)
+
+## Times Pregnant
+plot = dimethylnap15 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap15$b26, dimethylnap15$log_pah)
+
+plot = dimethylnap15 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap15$b26 ~ dimethylnap15$lod)
+```
+## 1,3 and 1,6-dimethylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dimethylnap16 = full_data %>% 
+  filter(compound == "1,6 and 1,3-Dimethylnaphthalene") 
+
+plot = dimethylnap16 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = dimethylnap16 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dimethylnap16$log_pah, dimethylnap16$copynum)
+t.test(dimethylnap16$copynum ~ dimethylnap16$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+dimethylnap16 = full_data %>% 
+  filter(compound == "1,6 and 1,3-Dimethylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = dimethylnap16 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dimethylnap16 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dimethylnap16$mom_age_num, dimethylnap16$log_pah)
+
+plot = dimethylnap16 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap16$mom_age_num ~ dimethylnap16$lod)
+
+## Gestational Age
+
+plot = dimethylnap16 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap16$est_gest_age, dimethylnap16$log_pah)
+
+plot = dimethylnap16 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap16$est_gest_age ~ dimethylnap16$lod)
+
+## Due Date
+plot = dimethylnap16 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dimethylnap16$due_date_num, dimethylnap16$log_pah)
+t.test(dimethylnap16$due_date_num ~ dimethylnap16$lod)
+
+plot = dimethylnap16 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dimethylnap16)
+summary(one.way)
+
+chisq.test(dimethylnap16$dob_season, dimethylnap16$lod)
+
+
+## Race
+plot = dimethylnap16 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dimethylnap16)
+summary(one.way)
+chisq.test(dimethylnap16$race, dimethylnap16$lod)
+
+## race4
+plot = dimethylnap16 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dimethylnap16)
+summary(one.way)
+chisq.test(dimethylnap16$race4, dimethylnap16$lod)
+
+## Sex
+plot = dimethylnap16 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = dimethylnap16)
+summary(one.way)
+
+chisq.test(dimethylnap16$mr_24, dimethylnap16$lod)
+
+## Times Pregnant
+plot = dimethylnap16 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylnap16$b26, dimethylnap16$log_pah)
+
+plot = dimethylnap16 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylnap16$b26 ~ dimethylnap16$lod)
+```
+
+## 1-methylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+methylnap1 = full_data %>% 
+  filter(compound == "1-methylnaphthalene") 
+
+plot = methylnap1 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point()
+plot
+
+cor.test(methylnap1$log_pah, methylnap1$copynum)
+
+plot = methylnap1 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+### only one blod
+
+```
+### Covariates
+```{r, echo = FALSE}
+methylnap1 = full_data %>% 
+  filter(compound == "1-methylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = methylnap1 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = methylnap1 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(methylnap1$mom_age_num, methylnap1$log_pah)
+
+plot = methylnap1 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+##insufficent observations for LOD t-test 
+
+## Gestational Age
+
+plot = methylnap1 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylnap1$est_gest_age, methylnap1$log_pah)
+
+plot = methylnap1 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for gestational age lod t-test
+
+## Due Date
+plot = methylnap1 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(methylnap1$due_date_num, methylnap1$log_pah)
+
+plot = methylnap1 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = methylnap1)
+summary(one.way)
+
+chisq.test(methylnap1$dob_season, methylnap1$lod)
+
+## insufficent obs for lod
+
+## Race
+plot = methylnap1 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = methylnap1)
+summary(one.way)
+chisq.test(methylnap1$race, methylnap1$lod)
+
+## race4
+plot = methylnap1 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = methylnap1)
+summary(one.way)
+chisq.test(methylnap1$race4, methylnap1$lod)
+
+## Sex
+plot = methylnap1 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = methylnap1)
+summary(one.way)
+
+chisq.test(methylnap1$mr_24, methylnap1$lod)
+
+## Times Pregnant
+plot = methylnap1 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylnap1$b26, methylnap1$log_pah)
+
+plot = methylnap1 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for t.test lod
+```
+
+## 1-methylphenanthrene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+methylphen1 = full_data %>% 
+  filter(compound == "1-methylphenanthrene") 
+
+plot = methylphen1 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point()
+plot
+
+
+plot = methylphen1 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+
+cor.test(methylphen1$log_pah, methylphen1$copynum)
+t.test(methylphen1$copynum ~ methylphen1$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+methylphen1 = full_data %>% 
+  filter(compound == "1-methylphenanthrene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = methylphen1 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = methylphen1 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(methylphen1$mom_age_num, methylphen1$log_pah)
+
+plot = methylphen1 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen1$mom_age_num ~ methylphen1$lod)
+
+## Gestational Age
+
+plot = methylphen1 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylphen1$est_gest_age, methylphen1$log_pah)
+
+plot = methylphen1 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen1$est_gest_age ~ methylphen1$lod)
+
+## Due Date
+plot = methylphen1 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(methylphen1$due_date_num, methylphen1$log_pah)
+t.test(methylphen1$due_date_num ~ methylphen1$lod)
+
+plot = methylphen1 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = methylphen1)
+summary(one.way)
+
+chisq.test(methylphen1$dob_season, methylphen1$lod)
+
+## Race
+plot = methylphen1 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = methylphen1)
+summary(one.way)
+chisq.test(methylphen1$race, methylphen1$lod)
+
+## race4
+plot = methylphen1 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = methylphen1)
+summary(one.way)
+chisq.test(methylphen1$race4, methylphen1$lod)
+
+## Sex
+plot = methylphen1 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = methylphen1)
+summary(one.way)
+
+chisq.test(methylphen1$mr_24, methylphen1$lod)
+
+## Times Pregnant
+plot = methylphen1 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylphen1$b26, methylphen1$log_pah)
+
+plot = methylphen1 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen1$b26 ~ methylphen1$lod)
+```
+
+
+
+## 1-methylpyrene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+methylpyr1 = full_data %>% 
+  filter(compound == "1-methylpyrene") 
+
+plot = methylpyr1 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point()
+plot
+
+
+plot = methylpyr1 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+
+cor.test(methylpyr1$log_pah, methylpyr1$copynum)
+t.test(methylpyr1$copynum ~ methylpyr1$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+methylpyr1 = full_data %>% 
+  filter(compound == "1-methylpyrene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = methylpyr1 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = methylpyr1 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(methylpyr1$mom_age_num, methylpyr1$log_pah)
+
+plot = methylpyr1 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(methylpyr1$mom_age_num ~ methylpyr1$lod)
+
+## Gestational Age
+
+plot = methylpyr1 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylpyr1$est_gest_age, methylpyr1$log_pah)
+
+plot = methylpyr1 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(methylpyr1$est_gest_age ~ methylpyr1$lod)
+
+## Due Date
+plot = methylpyr1 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(methylpyr1$due_date_num, methylpyr1$log_pah)
+t.test(methylpyr1$due_date_num ~ methylpyr1$lod)
+
+plot = methylpyr1 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = methylpyr1)
+summary(one.way)
+
+chisq.test(methylpyr1$dob_season, methylpyr1$lod)
+
+## Race
+plot = methylpyr1 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = methylpyr1)
+summary(one.way)
+chisq.test(methylpyr1$race, methylpyr1$lod)
+
+## race4
+plot = methylpyr1 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = methylpyr1)
+summary(one.way)
+chisq.test(methylpyr1$race4, methylpyr1$lod)
+
+## Sex
+plot = methylpyr1 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = methylpyr1)
+summary(one.way)
+
+chisq.test(methylpyr1$mr_24, methylpyr1$lod)
+
+## Times Pregnant
+plot = methylpyr1 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylpyr1$b26, methylpyr1$log_pah)
+
+plot = methylpyr1 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(methylpyr1$b26 ~ methylpyr1$lod)
+```
+
+## 2-ethylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+ethylnap2 = full_data %>% 
+  filter(compound == "2-ethylnaphthalene") 
+
+plot = ethylnap2 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = ethylnap2 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+
+cor.test(ethylnap2$log_pah, ethylnap2$copynum)
+t.test(ethylnap2$copynum ~ ethylnap2$lod)
+
+```
+
+### Covariates
+```{r, echo = FALSE}
+ethylnap2 = full_data %>% 
+  filter(compound == "2-ethylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = ethylnap2 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = ethylnap2 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(ethylnap2$mom_age_num, ethylnap2$log_pah)
+
+plot = ethylnap2 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(ethylnap2$mom_age_num ~ ethylnap2$lod)
+
+## Gestational Age
+
+plot = ethylnap2 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(ethylnap2$est_gest_age, ethylnap2$log_pah)
+
+plot = ethylnap2 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(ethylnap2$est_gest_age ~ ethylnap2$lod)
+
+## Due Date
+plot = ethylnap2 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(ethylnap2$due_date_num, ethylnap2$log_pah)
+t.test(ethylnap2$due_date_num ~ ethylnap2$lod)
+
+plot = ethylnap2 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = ethylnap2)
+summary(one.way)
+
+chisq.test(ethylnap2$dob_season, ethylnap2$lod)
+
+## Race
+plot = ethylnap2 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = ethylnap2)
+summary(one.way)
+chisq.test(ethylnap2$race, ethylnap2$lod)
+
+## race4
+plot = ethylnap2 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = ethylnap2)
+summary(one.way)
+chisq.test(ethylnap2$race4, ethylnap2$lod)
+
+## Sex
+plot = ethylnap2 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = ethylnap2)
+summary(one.way)
+
+chisq.test(ethylnap2$mr_24, ethylnap2$lod)
+
+## Times Pregnant
+plot = ethylnap2 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(ethylnap2$b26, ethylnap2$log_pah)
+
+plot = ethylnap2 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(ethylnap2$b26 ~ ethylnap2$lod)
+```
+
+## 2-methylnaphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+methylnap2 = full_data %>% 
+  filter(compound == "2-methylnaphthalene") 
+
+plot = methylnap2 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = methylnap2 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+### only one sample BLOD
+
+cor.test(methylnap2$log_pah, methylnap2$copynum)
+```
+### Covariates
+```{r, echo = FALSE}
+methylnap2 = full_data %>% 
+  filter(compound == "2-methylnaphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = methylnap2 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = methylnap2 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(methylnap2$mom_age_num, methylnap2$log_pah)
+
+plot = methylnap2 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for lod 
+
+## Gestational Age
+
+plot = methylnap2 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylnap2$est_gest_age, methylnap2$log_pah)
+
+plot = methylnap2 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for lod 
+
+## Due Date
+plot = methylnap2 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(methylnap2$due_date_num, methylnap2$log_pah)
+
+## insufficent obs for lod ttest
+
+plot = methylnap2 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = methylnap2)
+summary(one.way)
+
+chisq.test(methylnap2$dob_season, methylnap2$lod)
+
+## Race
+plot = methylnap2 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = methylnap2)
+summary(one.way)
+chisq.test(methylnap2$race, methylnap2$lod)
+
+## race4
+plot = methylnap2 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = methylnap2)
+summary(one.way)
+chisq.test(methylnap2$race4, methylnap2$lod)
+
+## Sex
+plot = methylnap2 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = methylnap2)
+summary(one.way)
+
+chisq.test(methylnap2$mr_24, methylnap2$lod)
+
+## Times Pregnant
+plot = methylnap2 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylnap2$b26, methylnap2$log_pah)
+
+plot = methylnap2 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for lod 
+```
+
+## 2-methylphenanthrene 
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+methylphen2 = full_data %>% 
+  filter(compound == "2-methylphenanthrene") 
+
+plot = methylphen2 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = methylphen2 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(methylphen2$log_pah, methylphen2$copynum)
+t.test(methylphen2$copynum ~ methylphen2$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+methylphen2 = full_data %>% 
+  filter(compound == "2-methylphenanthrene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = methylphen2 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = methylphen2 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(methylphen2$mom_age_num, methylphen2$log_pah)
+
+plot = methylphen2 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen2$mom_age_num ~ methylphen2$lod)
+
+## Gestational Age
+
+plot = methylphen2 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylphen2$est_gest_age, methylphen2$log_pah)
+
+plot = methylphen2 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen2$est_gest_age ~ methylphen2$lod)
+
+## Due Date
+plot = methylphen2 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(methylphen2$due_date_num, methylphen2$log_pah)
+t.test(methylphen2$due_date_num ~ methylphen2$lod)
+
+plot = methylphen2 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = methylphen2)
+summary(one.way)
+
+chisq.test(methylphen2$dob_season, methylphen2$lod)
+
+## Race
+plot = methylphen2 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = methylphen2)
+summary(one.way)
+chisq.test(methylphen2$race, methylphen2$lod)
+
+## race4
+plot = methylphen2 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = methylphen2)
+summary(one.way)
+chisq.test(methylphen2$race4, methylphen2$lod)
+
+## Sex
+plot = methylphen2 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = methylphen2)
+summary(one.way)
+
+chisq.test(methylphen2$mr_24, methylphen2$lod)
+
+## Times Pregnant
+plot = methylphen2 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(methylphen2$b26, methylphen2$log_pah)
+
+plot = methylphen2 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(methylphen2$b26 ~ methylphen2$lod)
+```
+
+## 3,6-dimethylphenanthrene 
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dimethylphen36 = full_data %>% 
+  filter(compound == "3,6-dimethylphenanthrene") 
+
+plot = dimethylphen36 %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = dimethylphen36 %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dimethylphen36$log_pah, dimethylphen36$copynum)
+t.test(dimethylphen36$copynum ~ dimethylphen36$lod)
+```
+
+### Covariates
+```{r, echo = FALSE}
+dimethylphen36 = full_data %>% 
+  filter(compound == "3,6-dimethylphenanthrene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = dimethylphen36 %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dimethylphen36 %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dimethylphen36$mom_age_num, dimethylphen36$log_pah)
+
+plot = dimethylphen36 %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylphen36$mom_age_num ~ dimethylphen36$lod)
+
+## Gestational Age
+
+plot = dimethylphen36 %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylphen36$est_gest_age, dimethylphen36$log_pah)
+
+plot = dimethylphen36 %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylphen36$est_gest_age ~ dimethylphen36$lod)
+
+## Due Date
+plot = dimethylphen36 %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dimethylphen36$due_date_num, dimethylphen36$log_pah)
+t.test(dimethylphen36$due_date_num ~ dimethylphen36$lod)
+
+plot = dimethylphen36 %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dimethylphen36)
+summary(one.way)
+
+chisq.test(dimethylphen36$dob_season, dimethylphen36$lod)
+
+## Race
+plot = dimethylphen36 %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dimethylphen36)
+summary(one.way)
+chisq.test(dimethylphen36$race, dimethylphen36$lod)
+
+## race4
+plot = dimethylphen36 %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dimethylphen36)
+summary(one.way)
+chisq.test(dimethylphen36$race4, dimethylphen36$lod)
+
+## Sex
+plot = dimethylphen36 %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = dimethylphen36)
+summary(one.way)
+
+chisq.test(dimethylphen36$mr_24, dimethylphen36$lod)
+
+## Times Pregnant
+plot = dimethylphen36 %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dimethylphen36$b26, dimethylphen36$log_pah)
+
+plot = dimethylphen36 %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dimethylphen36$b26 ~ dimethylphen36$lod)
+```
+
+## Pyrene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+pyrene = full_data %>% 
+  filter(compound == "Pyrene") 
+
+plot = pyrene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = pyrene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(pyrene$log_pah, pyrene$copynum)
+t.test(pyrene$copynum ~ pyrene$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+pyrene = full_data %>% 
+  filter(compound == "Pyrene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = pyrene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = pyrene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(pyrene$mom_age_num, pyrene$log_pah)
+
+plot = pyrene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(pyrene$mom_age_num ~ pyrene$lod)
+
+## Gestational Age
+
+plot = pyrene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(pyrene$est_gest_age, pyrene$log_pah)
+
+plot = pyrene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(pyrene$est_gest_age ~ pyrene$lod)
+
+## Due Date
+plot = pyrene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(pyrene$due_date_num, pyrene$log_pah)
+t.test(pyrene$due_date_num ~ pyrene$lod)
+
+plot = pyrene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = pyrene)
+summary(one.way)
+
+chisq.test(pyrene$dob_season, pyrene$lod)
+
+## Race
+plot = pyrene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = pyrene)
+summary(one.way)
+chisq.test(pyrene$race, pyrene$lod)
+
+## race4
+plot = pyrene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = pyrene)
+summary(one.way)
+chisq.test(pyrene$race4, pyrene$lod)
+
+## Sex
+plot = pyrene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = pyrene)
+summary(one.way)
+
+chisq.test(pyrene$mr_24, pyrene$lod)
+
+## Times Pregnant
+plot = pyrene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(pyrene$b26, pyrene$log_pah)
+
+plot = pyrene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(pyrene$b26 ~ pyrene$lod)
+```
+
+## Acenaphthene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+acenaphthene = full_data %>% 
+  filter(compound == "acenaphthene") 
+
+plot = acenaphthene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = acenaphthene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(acenaphthene$log_pah, acenaphthene$copynum)
+t.test(acenaphthene$copynum ~ acenaphthene$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+acenaphthene = full_data %>% 
+  filter(compound == "acenaphthene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = acenaphthene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = acenaphthene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(acenaphthene$mom_age_num, acenaphthene$log_pah)
+
+plot = acenaphthene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(acenaphthene$mom_age_num ~ acenaphthene$lod)
+
+## Gestational Age
+
+plot = acenaphthene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(acenaphthene$est_gest_age, acenaphthene$log_pah)
+
+plot = acenaphthene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(acenaphthene$est_gest_age ~ acenaphthene$lod)
+
+## Due Date
+plot = acenaphthene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(acenaphthene$due_date_num, acenaphthene$log_pah)
+t.test(acenaphthene$due_date_num ~ acenaphthene$lod)
+
+plot = acenaphthene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = acenaphthene)
+summary(one.way)
+
+chisq.test(acenaphthene$dob_season, acenaphthene$lod)
+
+## Race
+plot = acenaphthene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = acenaphthene)
+summary(one.way)
+chisq.test(acenaphthene$race, acenaphthene$lod)
+
+## race4
+plot = acenaphthene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = acenaphthene)
+summary(one.way)
+chisq.test(acenaphthene$race4, acenaphthene$lod)
+
+## Sex
+plot = acenaphthene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = acenaphthene)
+summary(one.way)
+
+chisq.test(acenaphthene$mr_24, acenaphthene$lod)
+
+## Times Pregnant
+plot = acenaphthene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(acenaphthene$b26, acenaphthene$log_pah)
+
+plot = acenaphthene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(acenaphthene$b26 ~ acenaphthene$lod)
+```
+
+
+
+
+
+
+## Anthracene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+anthracene = full_data %>% 
+  filter(compound == "anthracene") 
+
+plot = anthracene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = anthracene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(anthracene$log_pah, anthracene$copynum)
+t.test(anthracene$copynum ~ anthracene$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+anthracene = full_data %>% 
+  filter(compound == "anthracene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = anthracene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = anthracene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(anthracene$mom_age_num, anthracene$log_pah)
+
+plot = anthracene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(anthracene$mom_age_num ~ anthracene$lod)
+
+## Gestational Age
+
+plot = anthracene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(anthracene$est_gest_age, anthracene$log_pah)
+
+plot = anthracene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(anthracene$est_gest_age ~ anthracene$lod)
+
+## Due Date
+plot = anthracene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(anthracene$due_date_num, anthracene$log_pah)
+t.test(anthracene$due_date_num ~ anthracene$lod)
+
+plot = anthracene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = anthracene)
+summary(one.way)
+
+chisq.test(anthracene$dob_season, anthracene$lod)
+
+## Race
+plot = anthracene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = anthracene)
+summary(one.way)
+chisq.test(anthracene$race, anthracene$lod)
+
+## race4
+plot = anthracene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = anthracene)
+summary(one.way)
+chisq.test(anthracene$race4, anthracene$lod)
+
+## Sex
+plot = anthracene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = anthracene)
+summary(one.way)
+
+chisq.test(anthracene$mr_24, anthracene$lod)
+
+## Times Pregnant
+plot = anthracene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(anthracene$b26, anthracene$log_pah)
+
+plot = anthracene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(anthracene$b26 ~ anthracene$lod)
+```
+
+
+
+
+## Dibenzothiophene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+dibenzothiophene = full_data %>% 
+  filter(compound == "dibenzothiophene") 
+
+plot = dibenzothiophene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = dibenzothiophene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(dibenzothiophene$log_pah, dibenzothiophene$copynum)
+t.test(dibenzothiophene$copynum ~ dibenzothiophene$lod)
+```
+### Covariates
+```{r, echo = FALSE}
+dibenzothiophene = full_data %>% 
+  filter(compound == "dibenzothiophene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = dibenzothiophene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = dibenzothiophene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(dibenzothiophene$mom_age_num, dibenzothiophene$log_pah)
+
+plot = dibenzothiophene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(dibenzothiophene$mom_age_num ~ dibenzothiophene$lod)
+
+## Gestational Age
+
+plot = dibenzothiophene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dibenzothiophene$est_gest_age, dibenzothiophene$log_pah)
+
+plot = dibenzothiophene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(dibenzothiophene$est_gest_age ~ dibenzothiophene$lod)
+
+## Due Date
+plot = dibenzothiophene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(dibenzothiophene$due_date_num, dibenzothiophene$log_pah)
+t.test(dibenzothiophene$due_date_num ~ dibenzothiophene$lod)
+
+plot = dibenzothiophene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = dibenzothiophene)
+summary(one.way)
+
+chisq.test(dibenzothiophene$dob_season, dibenzothiophene$lod)
+
+## Race
+plot = dibenzothiophene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = dibenzothiophene)
+summary(one.way)
+chisq.test(dibenzothiophene$race, dibenzothiophene$lod)
+
+## race4
+plot = dibenzothiophene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = dibenzothiophene)
+summary(one.way)
+chisq.test(dibenzothiophene$race4, dibenzothiophene$lod)
+
+## Sex
+plot = dibenzothiophene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = dibenzothiophene)
+summary(one.way)
+
+chisq.test(dibenzothiophene$mr_24, dibenzothiophene$lod)
+
+## Times Pregnant
+plot = dibenzothiophene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(dibenzothiophene$b26, dibenzothiophene$log_pah)
+
+plot = dibenzothiophene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(dibenzothiophene$b26 ~ dibenzothiophene$lod)
+```
+
+
+## Fluoranthene  
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+fluoranthene = full_data %>% 
+  filter(compound == "fluoranthene") 
+
+plot = fluoranthene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = fluoranthene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(fluoranthene$log_pah, fluoranthene$copynum)
+t.test(fluoranthene$copynum ~ fluoranthene$lod)
+
+```
+
+
+### Covariates
+```{r, echo = FALSE}
+fluoranthene = full_data %>% 
+  filter(compound == "fluoranthene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = fluoranthene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = fluoranthene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(fluoranthene$mom_age_num, fluoranthene$log_pah)
+
+plot = fluoranthene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(fluoranthene$mom_age_num ~ fluoranthene$lod)
+
+## Gestational Age
+
+plot = fluoranthene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(fluoranthene$est_gest_age, fluoranthene$log_pah)
+
+plot = fluoranthene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(fluoranthene$est_gest_age ~ fluoranthene$lod)
+
+## Due Date
+plot = fluoranthene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(fluoranthene$due_date_num, fluoranthene$log_pah)
+t.test(fluoranthene$due_date_num ~ fluoranthene$lod)
+
+plot = fluoranthene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = fluoranthene)
+summary(one.way)
+
+chisq.test(fluoranthene$dob_season, fluoranthene$lod)
+
+## Race
+plot = fluoranthene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = fluoranthene)
+summary(one.way)
+chisq.test(fluoranthene$race, fluoranthene$lod)
+
+## race4
+plot = fluoranthene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = fluoranthene)
+summary(one.way)
+chisq.test(fluoranthene$race4, fluoranthene$lod)
+
+## Sex
+plot = fluoranthene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = fluoranthene)
+summary(one.way)
+
+chisq.test(fluoranthene$mr_24, fluoranthene$lod)
+
+## Times Pregnant
+plot = fluoranthene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(fluoranthene$b26, fluoranthene$log_pah)
+
+plot = fluoranthene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(fluoranthene$b26 ~ fluoranthene$lod)
+```
+
+
+## Fluorene  
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+fluorene = full_data %>% 
+  filter(compound == "fluorene") 
+
+plot = fluorene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+plot = fluorene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+cor.test(fluorene$log_pah, fluorene$copynum)
+t.test(fluorene$copynum ~ fluorene$lod)
+
+```
+### Covariates
+```{r, echo = FALSE}
+fluorene = full_data %>% 
+  filter(compound == "fluorene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = fluorene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = fluorene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(fluorene$mom_age_num, fluorene$log_pah)
+
+plot = fluorene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(fluorene$mom_age_num ~ fluorene$lod)
+
+## Gestational Age
+
+plot = fluorene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(fluorene$est_gest_age, fluorene$log_pah)
+
+plot = fluorene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(fluorene$est_gest_age ~ fluorene$lod)
+
+## Due Date
+plot = fluorene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(fluorene$due_date_num, fluorene$log_pah)
+t.test(fluorene$due_date_num ~ fluorene$lod)
+
+plot = fluorene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = fluorene)
+summary(one.way)
+
+chisq.test(fluorene$dob_season, fluorene$lod)
+
+## Race
+plot = fluorene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = fluorene)
+summary(one.way)
+chisq.test(fluorene$race, fluorene$lod)
+
+## race4
+plot = fluorene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = fluorene)
+summary(one.way)
+chisq.test(fluorene$race4, fluorene$lod)
+
+## Sex
+plot = fluorene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = fluorene)
+summary(one.way)
+
+chisq.test(fluorene$mr_24, fluorene$lod)
+
+## Times Pregnant
+plot = fluorene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(fluorene$b26, fluorene$log_pah)
+
+plot = fluorene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(fluorene$b26 ~ fluorene$lod)
+```
+
+## Retene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+retene = full_data %>% 
+  filter(compound == "retene") 
+
+plot = retene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+cor.test(retene$log_pah, retene$copynum)
+
+plot = retene %>%
+  ggplot(aes(x = lod, y = copynum)) +
+  geom_boxplot()
+plot
+
+t.test(retene$copynum ~ retene$lod)
+```
+
+### Covariate
+```{r, echo = FALSE}
+retene = full_data %>% 
+  filter(compound == "retene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = retene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = retene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(retene$mom_age_num, retene$log_pah)
+
+plot = retene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+t.test(retene$mom_age_num ~ retene$lod)
+
+## Gestational Age
+
+plot = retene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(retene$est_gest_age, retene$log_pah)
+
+plot = retene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+t.test(retene$est_gest_age ~ retene$lod)
+
+## Due Date
+plot = retene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(retene$due_date_num, retene$log_pah)
+t.test(retene$due_date_num ~ retene$lod)
+
+plot = retene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = retene)
+summary(one.way)
+
+chisq.test(retene$dob_season, retene$lod)
+
+## Race
+plot = retene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = retene)
+summary(one.way)
+chisq.test(retene$race, retene$lod)
+
+## race4
+plot = retene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = retene)
+summary(one.way)
+chisq.test(retene$race4, retene$lod)
+
+## Sex
+plot = retene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = retene)
+summary(one.way)
+
+chisq.test(retene$mr_24, retene$lod)
+
+## Times Pregnant
+plot = retene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(retene$b26, retene$log_pah)
+
+plot = retene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+t.test(retene$b26 ~ retene$lod)
+```
+
+
+## naphthalene
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+naphthalene = full_data %>% 
+  filter(compound == "naphthalene") 
+
+plot = naphthalene %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+cor.test(naphthalene$log_pah, naphthalene$copynum)
+```
+
+### Covariate
+```{r, echo = FALSE}
+naphthalene = full_data %>% 
+  filter(compound == "naphthalene") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+lod_count = naphthalene %>%
+  group_by(compound, lod) %>%
+  count()
+lod_count
+
+## Maternal Age
+plot = naphthalene %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+cor.test(naphthalene$mom_age_num, naphthalene$log_pah)
+
+plot = naphthalene %>% ggplot(aes(x = lod, y = mom_age_num)) + 
+  geom_boxplot()
+plot
+
+## insufficient samples for lod
+
+## Gestational Age
+
+plot = naphthalene %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(naphthalene$est_gest_age, naphthalene$log_pah)
+
+plot = naphthalene %>% ggplot(aes(x = lod, y = est_gest_age)) + 
+  geom_boxplot()
+plot
+
+## insufficent samples for lod
+
+## Due Date
+plot = naphthalene %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(naphthalene$due_date_num, naphthalene$log_pah)
+
+## insufficient samples for lod
+
+plot = naphthalene %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+one.way <- aov(log_pah ~ dob_season, data = naphthalene)
+summary(one.way)
+
+chisq.test(naphthalene$dob_season, naphthalene$lod)
+
+## Race
+plot = naphthalene %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race, data = naphthalene)
+summary(one.way)
+chisq.test(naphthalene$race, naphthalene$lod)
+
+## race4
+plot = naphthalene %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ race4, data = naphthalene)
+summary(one.way)
+chisq.test(naphthalene$race4, naphthalene$lod)
+
+## Sex
+plot = naphthalene %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+one.way <- aov(log_pah ~ mr_24, data = naphthalene)
+summary(one.way)
+
+chisq.test(naphthalene$mr_24, naphthalene$lod)
+
+## Times Pregnant
+plot = naphthalene %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(naphthalene$b26, naphthalene$log_pah)
+
+plot = naphthalene %>% ggplot(aes(x = lod, y = b26)) + 
+  geom_boxplot()
+plot
+
+## insufficient obs for lod
+```
+
+
+
+## Total PAH
+### logPAH - mtDNAcn
+```{r, echo = FALSE}
+tot_pah = full_data %>% 
+  filter(compound == "total_pah") 
+
+tot_pah = tot_pah %>%
+  filter(ng_g <1000)
+
+plot = tot_pah %>% ggplot(aes(x = ng_g)) + geom_density()
+plot
+
+plot = tot_pah %>% ggplot(aes(x = log_pah)) + geom_density()
+plot
+
+plot = tot_pah %>%
+  ggplot(aes(x = log_pah, y = copynum)) +
+  geom_point() +
+  geom_smooth(method = lm)
+plot
+
+cor.test(tot_pah$log_pah, tot_pah$copynum)
+```
+
+### Covariate
+```{r, echo = FALSE}
+tot_pah = full_data %>% 
+  filter(compound == "total_pah") %>%
+  filter(mom_age_num > 10) %>%
+  filter(est_gest_age > -40)
+
+## Maternal Age
+plot = tot_pah %>% ggplot(aes(x = mom_age_num, y = log_pah)) + geom_point() + geom_smooth(method = lm) 
+plot
+
+
+cor.test(tot_pah$mom_age_num, tot_pah$log_pah)
+
+## Gestational Age
+
+plot = tot_pah %>% ggplot(aes(x = est_gest_age, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(tot_pah$est_gest_age, tot_pah$log_pah)
+
+
+## Due Date
+plot = tot_pah %>% ggplot(aes(x = due_date, y = log_pah)) + geom_point() + geom_smooth(method = loess)
+plot
+
+cor.test(tot_pah$due_date_num, tot_pah$log_pah)
+
+## insufficient samples for lod
+
+plot = tot_pah %>% ggplot(aes(x = dob_season, y = log_pah)) + geom_boxplot()
+plot
+
+
+## Race
+plot = tot_pah %>% ggplot(aes(x = race, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+## race4
+plot = tot_pah %>% ggplot(aes(x = race4, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+## Sex
+plot = tot_pah %>% ggplot(aes(x = mr_24, y = log_pah)) + geom_boxplot() +  theme(text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot
+
+t.test(tot_pah$log_pah ~ tot_pah$mr_24)
+
+## Times Pregnant
+plot = tot_pah %>% ggplot(aes(x = b26, y = log_pah)) + geom_point() + geom_smooth(method = lm)
+plot
+
+cor.test(tot_pah$b26, tot_pah$log_pah)
+
+```
+
+# MODELS 
+
+## 1,2-dimethylnaphthalene
+### FULL MODEL
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1,2-dimethylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c1_cont = c1 = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,2-dimethylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1,2-dimethylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date, mom_age_num, b26)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c1_lod = c1 = get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,2-dimethylnaphthalene", data = "dichotomous")
+```
+## 1,4-dimethylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1,4-dimethylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c2_cont = c2 = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,4-dimethylnaphthalene", data = "continuous")
+
+select_data = full_data %>%
+  filter(compound == "1,4-dimethylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c2_lod = c2 = get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,4-dimethylnaphthalene", data = "dichotomous")
+```
+
+## 1,5-dimethylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1,5-dimethylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c3_cont = c3 = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,5-dimethylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1,5-dimethylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c3_lod = c3 = get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,5-dimethylnaphthalene", data = "dichotomous")
+
+```
+
+## 1,6 and 1,3-Dimethylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1,6 and 1,3-Dimethylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c4_cont = c4 = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,3 and 1,6-dimethylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1,6 and 1,3-Dimethylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c4_lod = c4 = get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1,3 and 1,6-dimethylnaphthalene", data = "dichotomous")
+
+```
+
+## 1-methylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1-methylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c5_cont = c5 = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1-methylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c5_lod = c5 = get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylnaphthalene", data = "dichotomous")
+
+```
+
+## 1-methylpyrene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1-methylpyrene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c6_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylpyrene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1-methylpyrene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c6_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylpyrene", data = "dichotomous")
+
+```
+
+## 2-ethylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "2-ethylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c7_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-ethylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "2-ethylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date, mom_age_num, b26)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c7_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-ethylnaphthalene", data = "dichotomous")
+
+```
+
+## 2-methylnaphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "2-methylnaphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c8_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-methylnaphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "2-methylnaphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c8_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-methylnaphthalene", data = "dichotomous")
+
+```
+
+## 2-methylphenanthrene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "2-methylphenanthrene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c9_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-methylphenanthrene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "2-methylphenanthrene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date, mom_age_num, b26)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c9_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "2-methylphenanthrene", data = "dichotomous")
+
+```
+
+## 3,6-dimethylphenanthrene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "3,6-dimethylphenanthrene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c10_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "3,6-dimethylphenanthrene", data = "continuous")
+
+select_data = full_data %>%
+  filter(compound == "3,6-dimethylphenanthrene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c10_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "3,6-dimethylphenanthrene", data = "dichotomous")
+
+```
+
+## Pyrene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "Pyrene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c11_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Pyrene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "Pyrene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c11_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Pyrene", data = "dichotomous")
+
+```
+
+## Acenaphthene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "acenaphthene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c12_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Acenaphthene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "acenaphthene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c12_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Acenaphthene", data = "dichotomous")
+
+```
+
+
+## Anthracene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "anthracene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c13_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Anthracene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "anthracene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c13_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Anthracene", data = "dichotomous")
+
+```
+
+## Dibenzothiophene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "dibenzothiophene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c14_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Dibenzothiophene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "dibenzothiophene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c14_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Dibenzothiophene", data = "dichotomous")
+
+```
+
+## Fluoranthene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "fluoranthene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c15_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Fluoranthene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "fluoranthene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c15_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Fluoranthene", data = "dichotomous")
+
+```
+
+## Fluorene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "fluorene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c16_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Fluorene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "fluorene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c16_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Fluorene", data = "dichotomous")
+
+```
+
+## Retene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "retene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c17_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Retene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "retene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c17_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Retene", data = "dichotomous")
+
+```
+
+## Naphthalene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "naphthalene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c18_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Naphthalene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "naphthalene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c18_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "Naphthalene", data = "dichotomous")
+
+```
+
+## 1-methylphenanthrene
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "1-methylphenanthrene") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c19_cont = get_regression_table(full.model) %>%
+  filter(term == "log_pah") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylphenanthrene", data = "continuous")
+
+
+select_data = full_data %>%
+  filter(compound == "1-methylphenanthrene") %>%
+  dplyr::select(lod, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+
+c19_lod =  get_regression_table(full.model) %>%
+  filter(term == "lod: ALOD") %>%
+  dplyr::select(estimate, lower_ci, upper_ci) %>%
+  mutate(compound = "1-methylphenanthrene", data = "dichotomous")
+
+```
+
+
+## Summed PAH
+```{r, echo = FALSE}
+select_data = full_data %>%
+  filter(compound == "total_pah") %>%
+  dplyr::select(log_pah, copynum, est_gest_age, race4, mr_24, due_date)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+```
+
+## All Compounds in Model
+```{r, echo = FALSE}
+select_data = full_data %>%
+  pivot_wider(names_from = "compound", values_from = "log_pah")
+
+select_data = full_data %>%
+ dplyr::select(-sid, -ng_g, -qualifier.x, -qualifier.y, -batch, -run, -dna_ng_u_l, -se_m, -se_s, -mom_dob, -mom_age, -del_date, -race, -a03, -a06, -a11, -a12, -a13, -a14, -a15, -b26, -mom_age, -dob_season, -qualifier.y, -n, -perc, -lod, -due_date_num, -s_m, -log_pah)
+
+select_data = na.omit(select_data)
+
+full.model = lm(copynum ~., data = select_data)
+
+get_regression_summaries(full.model)
+get_regression_table(full.model)
+```
+
+## Plot
+```{r, echo = FALSE}
+table = rbind(c1_lod, c1_cont, c2_lod, c2_cont, c3_lod, c3_cont, c4_lod, c4_cont, c5_lod, c5_cont, c6_lod, c6_cont, c7_lod, c7_cont, c8_lod, c8_cont, c9_lod, c9_cont, c10_lod, c10_cont, c11_lod, c11_cont, c12_lod, c12_cont, c13_lod, c13_cont, c14_lod, c14_cont, c15_lod, c15_cont, c16_lod, c16_cont, c17_lod, c17_cont, c18_lod, c18_cont, c19_lod, c19_cont)
+
+custom_colors = c("continuous" = "#440154FF", "dichotomous" = "#22A884FF")
+
+plot = ggplot(data = table,
+      aes(x = estimate,
+          y = compound,
+          xmin = lower_ci,
+          xmax = upper_ci,
+          col = data)) +
+  geom_pointrange(position = position_dodge(width = 1), size = 0.5) +
+  geom_vline(xintercept = 0) +
+  scale_color_manual(values = custom_colors) +
+  scale_y_discrete(limits = rev(levels(table$compound))) +
+  ylab("Compound") +
+  xlab("Estimate") + 
+  labs(color = "PAH Data")
+
+plot
+
+ggsave("plot.pdf", plot, device = "pdf")
+```
+
